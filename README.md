@@ -1,111 +1,51 @@
-# VIBEX — Android app
+# Vibex — Android testing downloads
 
-A music player for Android. Search, stream, build playlists, read synced
-lyrics, and download tagged tracks with cover art.
+Search and play music, manage a library and playlists, use lyrics and local audio, and keep playback in a native Android service.
 
-**This repository is the app download.** The source lives at
-[Viswesh28/VIBEX](https://github.com/Viswesh28/VIBEX).
+## Recommended download
 
----
+### [Download Vibex 2.0-test5](https://github.com/Viswesh28/VIBEX-APK/releases/download/v2.0-test5-bundle/Vibex-2.0-test5.apk)
 
-## Download
+**[Open the test1–test5 testing release](https://github.com/Viswesh28/VIBEX-APK/releases/tag/v2.0-test5-bundle)** · [Full release notes](releases/v2.0-test5-bundle/RELEASE-NOTES.md) · [Checksums](releases/v2.0-test5-bundle/SHA256SUMS)
 
-### ➡️ [**VIBEX.apk**](VIBEX.apk) — 4.25 MB
+Test5 fixes the missing notification player while retaining the fixed top header, direct return to the current song, manual Battery Saver, playlists, lyrics, downloads, and selected icon. These are **debug-signed testing builds**, not production releases.
 
-Or grab it from the [Releases](../../releases/latest) page.
+| Build | Purpose | APK |
+|---|---|---|
+| **test5 — recommended** | Notification-session registration fix and Android-framework regression tests | [Download](https://github.com/Viswesh28/VIBEX-APK/releases/download/v2.0-test5-bundle/Vibex-2.0-test5.apk) |
+| test4 — historical | Fixed header/current-song return; known missing-notification defect | [Download](https://github.com/Viswesh28/VIBEX-APK/releases/download/v2.0-test5-bundle/Vibex-2.0-test4.apk) |
+| test3 — historical | Battery Saver, Home cache, playlist pins/sort, lyric offsets, optional autoplay | [Download](https://github.com/Viswesh28/VIBEX-APK/releases/download/v2.0-test5-bundle/Vibex-2.0-test3.apk) |
+| test2 — historical | Vibex branding, creator credit, recent searches, download badges, performance | [Download](https://github.com/Viswesh28/VIBEX-APK/releases/download/v2.0-test5-bundle/Vibex-2.0-test2.apk) |
+| test1 — historical | Initial native v2 test build and selected AI-generated icon; label VIBEX Test | [Download](https://github.com/Viswesh28/VIBEX-APK/releases/download/v2.0-test5-bundle/VIBEX-2.0-test1.apk) |
 
-| | |
-|---|---|
-| Version | 1.0 (versionCode 1) |
-| Package | `dev.viswesh.vibex` |
-| Requires | Android 6.0 (API 23) or newer |
-| Built against | API 35 |
-| Size | 4,455,761 bytes |
-| Signing | Debug key — see the note below |
-| SHA-256 | `25dcb1d7e5768547344764059895df438e74055407306f0c1d151d0af7878e96` |
+## Installation
 
-Verify your download matches before installing:
+- Requires **Android 6.0 / API 23+**. Target API 35.
+- Package: **`dev.viswesh.vibex.testing`**; test5 version code **7**.
+- Back up the test-app library, then install test5 over an earlier test APK **without uninstalling**. All five have the same development signing certificate. Device-specific upgrade behavior has not been comprehensively tested.
+- The original v1.0 app uses the separate package `dev.viswesh.vibex`. It is not automatically replaced and its private data does not automatically migrate into the test app.
+- Only install if you trust the source. Review Android security warnings; do not blindly bypass them or disable device protection. A checksum checks file integrity, not app safety.
 
-```bash
-sha256sum VIBEX.apk
+Test5 SHA-256:
+
+```text
+0c4f49c5072c476a3f0f344e4dcf51262e5185b431d4dc07ed48d22cc22795c2
 ```
 
----
+Play a song, press Home, and expand the notification shade to check the music card and controls. Android decides the system slider's layout and availability. Actual phone/OEM notification behavior still needs device testing; a successful framework simulation is not a phone test.
 
-## Installing
+## Source and verification
 
-1. Download `VIBEX.apk` to your phone.
-2. Tap it. Android will block the install the first time — it needs
-   permission to install from whatever app you downloaded with:
-   **Settings → Apps → Special access → Install unknown apps →** pick your
-   browser or file manager **→ Allow from this source**.
-3. Go back and tap the APK again. Install.
+Test5's recorded checks: **44 JavaScript + 26 browser + 32 JVM tests**, including Robolectric notification/control simulations for API 28 and 33. Existing dependency/security review remains open; earlier audits reported a `node-forge` advisory. No phone battery-life percentage or production-readiness claim is made.
 
-### About the security warning
+Source project: [Viswesh28/VIBEX](https://github.com/Viswesh28/VIBEX). This is the **distribution repository**. Available source patches are attached to the release; the source project's branches were not updated by this publication. See the [patch map and build caveats](releases/v2.0-test5-bundle/RELEASE-NOTES.md#available-source-patches).
 
-This is a **debug-signed** build, so Play Protect will likely show
-*"Unsafe app blocked"*. Tap **More details → Install anyway**.
+**Made with ❤️ by VISWESHSARAVAN**
 
-That warning means "Google has not reviewed this app", not "this app is
-malicious" — it appears for every sideloaded APK that did not come from the
-Play Store. If that is not acceptable to you, build it yourself from
-[the source repo](https://github.com/Viswesh28/VIBEX); the SHA-256 above lets
-you confirm you are running exactly this build.
+## Historical v1.0
 
----
-
-## Screenshots
-
-| Home | Search |
-|---|---|
-| ![Home](screenshots/home.png) | ![Search](screenshots/search.png) |
-
-| Menu | Now playing |
-|---|---|
-| ![Menu](screenshots/menu.png) | ![Player](screenshots/player.png) |
-
----
-
-## What it does
-
-- **Search** songs, albums, playlists and artists
-- **Stream** at up to 320 kbps, with a quality selector
-- **Playlists** you create locally, plus liked songs
-- **Synced lyrics** that scroll with the track
-- **Radio** — endless play seeded from any song or artist
-- **Downloads** written with full metadata: title, artist, album, year,
-  genre, lyrics and embedded cover art
-- **Crossfade**, a visualiser, light and dark themes
-- **Listening stats**
-
-### No server required
-
-The app is fully standalone. The API that talks to JioSaavn is bundled inside
-the APK, so there is nothing to host, configure or keep running — it needs
-only an internet connection.
-
----
-
-## Known limitations
-
-- **Playback stops when the app is backgrounded.** Background audio needs a
-  foreground-service plugin that is not wired up yet.
-- **Downloads** land in app-scoped storage (`Documents/VIBEX/`), so they may
-  disappear if you uninstall the app.
-- Not on the Play Store, and unlikely to be accepted there — sideload only.
-- Only the hardware back button is handled; there is no edge-swipe gesture to
-  open the menu.
-
----
+The root [`VIBEX.apk`](VIBEX.apk) and [v1.0 release](https://github.com/Viswesh28/VIBEX-APK/releases/tag/v1.0) are retained as historical artifacts. **They are not the recommended test5 download.** The existing `screenshots/` folder shows the older interface, not a verified test5 notification screenshot.
 
 ## Legal
 
-VIBEX streams from JioSaavn's public endpoints. It is **not** affiliated with,
-endorsed by, or connected to JioSaavn or Saavn Media Pvt. Ltd. in any way. It
-hosts no music itself.
-
-This is a personal, educational project. Please respect the rights of artists
-and rights-holders, and the terms of service of the platforms you use it with.
-
-See [NOTICE.md](NOTICE.md) and [DMCA.md](DMCA.md). Licensed under the terms in
-[LICENSE](LICENSE).
+Vibex is not affiliated with or endorsed by JioSaavn or Saavn Media Pvt. Ltd. It does not host music. Respect artists' rights, applicable law, and the services' terms. See [LICENSE](LICENSE), [NOTICE.md](NOTICE.md), and [DMCA.md](DMCA.md).
