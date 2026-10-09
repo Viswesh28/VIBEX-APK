@@ -1,0 +1,1654 @@
+diff --git a/music-app/android/app/build.gradle b/music-app/android/app/build.gradle
+index 744af69..bccfb55 100644
+--- a/music-app/android/app/build.gradle
++++ b/music-app/android/app/build.gradle
+@@ -7,7 +7,7 @@ android {
+         applicationId "dev.viswesh.vibex"
+         minSdkVersion rootProject.ext.minSdkVersion
+         targetSdkVersion rootProject.ext.targetSdkVersion
+-        versionCode 7
++        versionCode 9
+         versionName "2.0"
+         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+         aaptOptions {
+@@ -27,10 +27,25 @@ android {
+             systemProperty "maven.repo.local", new File(gradle.gradleUserHomeDir, "robolectric-m2").absolutePath
+         }
+     }
++    // One stable signing identity for every testing build, committed next to
++    // the project (android/vibex-testing.keystore). Debug builds signed with
++    // the machine's throwaway debug key forced a full uninstall before every
++    // update; with this key each new APK installs straight over the previous
++    // one, wherever it was built. Testing only — never ship a store release
++    // with a key whose password lives in the repo.
++    signingConfigs {
++        vibexTesting {
++            storeFile file('../vibex-testing.keystore')
++            storePassword 'vibex-testing'
++            keyAlias 'vibex-testing'
++            keyPassword 'vibex-testing'
++        }
++    }
+     buildTypes {
+         debug {
+             applicationIdSuffix ".testing"
+-            versionNameSuffix "-test5"
++            versionNameSuffix "-test7"
++            signingConfig signingConfigs.vibexTesting
+         }
+         release {
+             minifyEnabled false
+diff --git a/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibeAudioService.java b/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibeAudioService.java
+index d110189..afb5484 100644
+--- a/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibeAudioService.java
++++ b/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibeAudioService.java
+@@ -752,6 +752,10 @@ public class VibeAudioService extends MediaSessionService {
+       o.put("playing", player.isPlaying());
+       o.put("buffering", player.getPlaybackState() == Player.STATE_BUFFERING);
+       o.put("error", error);
++      o.put(
++          "viaYoutube",
++          player.getCurrentMediaItem() != null
++              && YtFallback.via(player.getCurrentMediaItem().mediaId));
+       o.put("sleepUntil", sleepUntil);
+       o.put("eqAvailable", eq != null);
+     } catch (Exception ignored) {
+diff --git a/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibeMedia.java b/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibeMedia.java
+index 86dcab4..8b58964 100644
+--- a/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibeMedia.java
++++ b/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibeMedia.java
+@@ -70,7 +70,12 @@ public final class VibeMedia {
+             spec -> {
+               if (!"vibex".equals(spec.uri.getScheme())) return spec;
+               String id = spec.uri.getLastPathSegment();
+-              return spec.withUri(Uri.parse(resolve(id, spec.uri.getQueryParameter("q"))));
++              return spec.withUri(
++                  Uri.parse(
++                      resolve(
++                          id,
++                          spec.uri.getQueryParameter("q"),
++                          "1".equals(spec.uri.getQueryParameter("dl")))));
+             });
+     DataSource.Factory cached =
+         new CacheDataSource.Factory()
+@@ -122,24 +127,102 @@ public final class VibeMedia {
+     return streamKey(spec);
+   }
+ 
++  /** ids whose stream died mid-playback; the next resolve probes before trusting Saavn again. */
++  private final Set<String> suspect = new HashSet<>();
++
+   public synchronized void invalidate(String id) {
+     for (String q : new String[] {"12kbps", "48kbps", "96kbps", "160kbps", "320kbps"})
+       urls.remove(id + q);
++    suspect.add(id);
+   }
+ 
++  /** Last seen audio-source mode; a switch invalidates resolved URLs at once. */
++  private String lastMode = null;
++
+   public void configure(JSONObject prefs) {
+     manager.setRequirements(
+         new Requirements(
+             Requirements.NETWORK
+                 | (prefs.optBoolean("wifiOnly", true) ? Requirements.NETWORK_UNMETERED : 0)));
++    String mode = prefs.optString("audioSource", "auto");
++    synchronized (this) {
++      // Flipping the source should bite on the very next resolve, not after
++      // the 2-minute URL cache drains.
++      if (lastMode != null && !lastMode.equals(mode)) urls.clear();
++      lastMode = mode;
++    }
+   }
+ 
+-  private synchronized String resolve(String id, String quality) throws IOException {
++  private synchronized String resolve(String id, String quality, boolean download)
++      throws IOException {
+     String q = quality == null ? store.settings().optString("quality", "320kbps") : quality;
+     if (!q.matches("(12|48|96|160|320)kbps")) q = "160kbps";
+     String key = id + q;
+     Resolved old = urls.get(key);
+     if (old != null && System.currentTimeMillis() - old.at < 120000) return old.url;
++    // Settings → Playback → Audio source: auto (Saavn first, YouTube rescue),
++    // saavn (never consult YouTube), youtube (YouTube first, Saavn rescue).
++    String mode = store.settings().optString("audioSource", "auto");
++    YtFallback yt = YtFallback.get(context);
++
++    // YouTube-first streams. Downloads deliberately stay on the auto path:
++    // offline copies should be stable CDN files at the chosen bitrate, with
++    // YouTube only as rescue — googlevideo URLs expire and ignore bitrate
++    // preferences.
++    if ("youtube".equals(mode) && !download) {
++      String routed = yt.routed(id);
++      if (routed != null) return routed;
++      String url = yt.resolve(store.song(id), id);
++      if (url != null) return url;
++      // No confident YouTube match — JioSaavn rescues the track rather than
++      // erroring, mirroring what auto does in the other direction.
++      suspect.remove(id);
++      return resolveSaavn(id, q, key);
++    }
++
++    // YouTube already took control of this track in this session? Skip the
++    // Saavn round-trip entirely (route cache — see YtFallback). In
++    // JioSaavn-only mode the route cache is ignored: the user asked for Saavn.
++    String routed = "saavn".equals(mode) ? null : yt.routed(id);
++    if (routed != null) return routed;
++    boolean verify = suspect.remove(id);
++    try {
++      String url = resolveSaavn(id, q, key);
++      // A mid-song death put this id under suspicion: don't trust a Saavn URL
++      // again until it survives a probe. A dead probe hands control to YouTube.
++      if (verify && !alive(url)) {
++        urls.remove(key);
++        throw new IOException("Saavn CDN URL failed liveness probe");
++      }
++      yt.release(id); // Saavn verified — it keeps/retakes control
++      return url;
++    } catch (IOException primary) {
++      // The user said JioSaavn only: fail truthfully, never switch services.
++      if ("saavn".equals(mode)) throw primary;
++      String rescue = yt.resolve(store.song(id), id);
++      if (rescue != null) return rescue; // takeover: same MediaItem, new URL underneath
++      throw primary; // truthful original error when YouTube has no confident match
++    }
++  }
++
++  private boolean alive(String url) {
++    HttpURLConnection con = null;
++    try {
++      con = (HttpURLConnection) new URL(url).openConnection();
++      con.setRequestMethod("HEAD");
++      con.setConnectTimeout(5000);
++      con.setReadTimeout(5000);
++      con.setRequestProperty("User-Agent", "VIBEX/2");
++      int code = con.getResponseCode();
++      return code >= 200 && code < 400;
++    } catch (Exception e) {
++      return false;
++    } finally {
++      if (con != null) con.disconnect();
++    }
++  }
++
++  private String resolveSaavn(String id, String q, String key) throws IOException {
+     HttpURLConnection con = null;
+     try {
+       URL u =
+diff --git a/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibexAudioPlugin.java b/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibexAudioPlugin.java
+index cbe3fdb..44404de 100644
+--- a/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibexAudioPlugin.java
++++ b/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/VibexAudioPlugin.java
+@@ -352,9 +352,11 @@ public class VibexAudioPlugin extends Plugin {
+               // Retrying keeps the original bitrate. Remove first to change an offline copy's
+               // quality.
+               if (existing != null) q = existing.request.uri.getQueryParameter("q");
++              // dl=1 marks a download resolve: offline copies always prefer
++              // stable Saavn CDN bytes regardless of the audio-source mode.
+               DownloadRequest request =
+                   new DownloadRequest.Builder(
+-                          id, Uri.parse("vibex://song/" + Uri.encode(id) + "?q=" + q))
++                          id, Uri.parse("vibex://song/" + Uri.encode(id) + "?q=" + q + "&dl=1"))
+                       .setCustomCacheKey(id + "|" + q)
+                       .setMimeType("audio/mp4")
+                       .build();
+diff --git a/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/YtFallback.java b/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/YtFallback.java
+new file mode 100644
+index 0000000..5ee2090
+--- /dev/null
++++ b/music-app/android/app/src/main/java/dev/viswesh/vibex/audio/YtFallback.java
+@@ -0,0 +1,462 @@
++package dev.viswesh.vibex.audio;
++
++import android.content.Context;
++import java.io.ByteArrayOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.net.HttpURLConnection;
++import java.net.URL;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import java.util.Set;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++/**
++ * JioSaavn → YouTube stream takeover. Login-free by design.
++ *
++ * Fired by VibeMedia.resolve() only after the Saavn path has failed (API error,
++ * dead CDN URL, region block). Two phases:
++ *
++ *   MATCH  — YT Music search, *songs filter first* (ATV = clean album audio whose
++ *            duration matches Saavn metadata ±2s), video songs only as rescue
++ *            with a stricter text threshold (film edits carry dialogues/intros,
++ *            so duration can't be trusted and the text match must carry more).
++ *            Below threshold the takeover refuses: a wrong song is worse than
++ *            an error. Even on video rescue only AUDIO formats are streamed.
++ *
++ *   STREAM — InnerTube /player across a measured client cascade:
++ *            ANDROID_VR 1.65.10 (whole-file capable, no cipher, no login)
++ *            → ANDROID_VR 1.43.32 (legacy pin, control)
++ *            → IOS (≈1 MiB preview only — still beats silence).
++ *
++ * Once YouTube wins a track it keeps control for the app session (route map),
++ * so the next resolve skips Saavn and the search round-trip entirely.
++ */
++final class YtFallback {
++  private static YtFallback instance;
++
++  static synchronized YtFallback get(Context c) {
++    if (instance == null) instance = new YtFallback();
++    return instance;
++  }
++
++  /** mediaId → videoId once a match was accepted (session route cache). */
++  private final Map<String, String> routes = new HashMap<>();
++
++  /** mediaId currently controlled by YouTube — read by the service snapshot. */
++  private static final Set<String> viaYt = new HashSet<>();
++
++  private static class Resolved {
++    final String url;
++    final long expiresAt;
++
++    Resolved(String url, long expiresAt) {
++      this.url = url;
++      this.expiresAt = expiresAt;
++    }
++  }
++
++  private final Map<String, Resolved> urls = new HashMap<>();
++
++  static synchronized boolean via(String mediaId) {
++    return mediaId != null && viaYt.contains(mediaId);
++  }
++
++  private static synchronized void markVia(String mediaId, boolean on) {
++    if (on) viaYt.add(mediaId);
++    else viaYt.remove(mediaId);
++  }
++
++  /** Fast path: YouTube already controls this track and its URL is still fresh. */
++  synchronized String routed(String mediaId) {
++    Resolved r = urls.get(mediaId);
++    if (r != null && System.currentTimeMillis() < r.expiresAt) return r.url;
++    String videoId = routes.get(mediaId);
++    if (videoId == null) return null;
++    try {
++      String url = streamUrl(videoId, mediaId);
++      return url;
++    } catch (Exception e) {
++      return null;
++    }
++  }
++
++  /**
++   * Full takeover: match by metadata, then stream. Returns null when no
++   * confident match or every client failed — the caller rethrows the original
++   * Saavn error so the user sees the truthful message.
++   */
++  synchronized String resolve(JSONObject song, String mediaId) {
++    if (song == null) return null;
++    try {
++      String videoId = routes.get(mediaId);
++      if (videoId == null) {
++        videoId = match(song);
++        if (videoId == null) return null;
++        routes.put(mediaId, videoId);
++      }
++      return streamUrl(videoId, mediaId);
++    } catch (Exception e) {
++      return null;
++    }
++  }
++
++  /** Saavn healed for this id (fresh resolve succeeded): hand control back. */
++  synchronized void release(String mediaId) {
++    urls.remove(mediaId);
++    markVia(mediaId, false);
++  }
++
++  // ---------------------------------------------------------------- matching
++
++  private static final String FILTER_SONGS = "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D";
++  private static final String FILTER_VIDEOS = "EgWKAQIQAWoKEAkQChAFEAMQBA%3D%3D";
++  static final double ACCEPT_SONGS = 0.55;
++  static final double ACCEPT_VIDEOS = 0.65;
++
++  private String match(JSONObject song) throws Exception {
++    String title = plain(song.optString("name"));
++    String artist = VibeMedia.artist(song);
++    String firstArtist = artist.split(",")[0].trim();
++    double duration = song.optDouble("duration", 0);
++    if (duration == 0 && song.optJSONObject("more_info") != null)
++      duration = song.optJSONObject("more_info").optDouble("duration", 0);
++    String query = (title + " " + firstArtist).trim();
++
++    // Phase 1: songs (ATV album audio). Phase 2: video songs, stricter.
++    String hit = bestOf(search(query, FILTER_SONGS), title, artist, duration, ACCEPT_SONGS);
++    if (hit != null) return hit;
++    return bestOf(search(query, FILTER_VIDEOS), title, artist, duration, ACCEPT_VIDEOS);
++  }
++
++  private static class Candidate {
++    String videoId = "";
++    String title = "";
++    String artists = "";
++    double duration = 0;
++  }
++
++  private String bestOf(
++      List<Candidate> candidates, String title, String artist, double duration, double threshold) {
++    Candidate best = null;
++    double bestScore = 0;
++    for (Candidate c : candidates) {
++      double s = score(title, artist, duration, c.title, c.artists, c.duration);
++      if (s > bestScore) {
++        bestScore = s;
++        best = c;
++      }
++    }
++    return best != null && bestScore >= threshold ? best.videoId : null;
++  }
++
++  /** Pure and static so it is unit-testable without Android. */
++  static double score(
++      String qTitle, String qArtists, double qDuration, String cTitle, String cArtists, double cDuration) {
++    String qt = normalize(qTitle), ct = normalize(cTitle);
++    double s = 0.5 * titleSimilarity(qt, ct);
++    s += 0.3 * artistOverlap(qArtists, cArtists + " " + ct);
++    s += 0.2 * durationScore(qDuration, cDuration);
++    for (String trap :
++        new String[] {"cover", "remix", "live", "slowed", "sped up", "reverb", "8d", "instrumental", "karaoke"})
++      if (ct.contains(trap) && !qt.contains(trap)) s -= 0.25;
++    return Math.max(0, Math.min(1, s));
++  }
++
++  private static final Pattern NOISE =
++      Pattern.compile(
++          "\\((official|lyric|lyrical|full|hd|4k|audio|video|visualizer)[^)]*\\)"
++              + "|\\[(official|lyric|lyrical|full|hd|4k|audio|video)[^]]*]"
++              + "|official video|official audio|lyric video|full song|video song|hq|hd",
++          Pattern.CASE_INSENSITIVE);
++
++  static String normalize(String s) {
++    if (s == null) return "";
++    s = NOISE.matcher(s).replaceAll(" ");
++    s = s.toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{N} ]", " ").replaceAll("\\s+", " ").trim();
++    return s;
++  }
++
++  private static double titleSimilarity(String a, String b) {
++    if (a.isEmpty() || b.isEmpty()) return 0;
++    if (a.equals(b)) return 1;
++    Set<String> ta = new HashSet<>(), tb = new HashSet<>();
++    for (String t : a.split(" ")) ta.add(t);
++    for (String t : b.split(" ")) tb.add(t);
++    Set<String> inter = new HashSet<>(ta);
++    inter.retainAll(tb);
++    Set<String> union = new HashSet<>(ta);
++    union.addAll(tb);
++    double jaccard = (double) inter.size() / union.size();
++    double containment = (double) inter.size() / Math.max(1, Math.min(ta.size(), tb.size()));
++    return Math.max(jaccard, 0.9 * containment);
++  }
++
++  private static double artistOverlap(String qArtists, String hay) {
++    String[] names = qArtists.split(",");
++    if (names.length == 0) return 0.5;
++    String h = normalize(hay);
++    int hits = 0, total = 0;
++    for (String n : names) {
++      String name = normalize(n);
++      if (name.isEmpty()) continue;
++      total++;
++      if (h.contains(name)) hits++;
++    }
++    return total == 0 ? 0.5 : (double) hits / total;
++  }
++
++  private static double durationScore(double q, double c) {
++    if (q <= 0 || c <= 0) return 0.5;
++    double d = Math.abs(q - c);
++    if (d <= 2) return 1;
++    if (d <= 5) return 0.7;
++    if (d <= 12) return 0.3;
++    return 0;
++  }
++
++  // ---------------------------------------------------------------- innertube
++
++  private List<Candidate> search(String query, String filter) throws Exception {
++    JSONObject client =
++        new JSONObject()
++            .put("clientName", "WEB_REMIX")
++            .put("clientVersion", "1.20241028.01.00")
++            .put("hl", "en")
++            .put("gl", "IN");
++    JSONObject body =
++        new JSONObject()
++            .put("context", new JSONObject().put("client", client))
++            .put("query", query)
++            .put("params", filter);
++    JSONObject res =
++        post(
++            "https://music.youtube.com/youtubei/v1/search?prettyPrint=false",
++            body,
++            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36");
++    List<Candidate> out = new ArrayList<>();
++    collectItems(res, out);
++    return out;
++  }
++
++  /** Walk the whole response for musicResponsiveListItemRenderer nodes. */
++  private void collectItems(Object node, List<Candidate> out) {
++    if (out.size() >= 12) return;
++    if (node instanceof JSONObject) {
++      JSONObject o = (JSONObject) node;
++      JSONObject item = o.optJSONObject("musicResponsiveListItemRenderer");
++      if (item != null) {
++        Candidate c = parseItem(item);
++        if (c != null) out.add(c);
++      }
++      JSONArray names = o.names();
++      if (names != null)
++        for (int i = 0; i < names.length(); i++) collectItems(o.opt(names.optString(i)), out);
++    } else if (node instanceof JSONArray) {
++      JSONArray a = (JSONArray) node;
++      for (int i = 0; i < a.length(); i++) collectItems(a.opt(i), out);
++    }
++  }
++
++  private static final Pattern TIME = Pattern.compile("^(\\d+):(\\d{2})(?::(\\d{2}))?$");
++
++  private Candidate parseItem(JSONObject item) {
++    try {
++      Candidate c = new Candidate();
++      JSONObject pid = item.optJSONObject("playlistItemData");
++      if (pid != null) c.videoId = pid.optString("videoId", "");
++      JSONArray cols = item.optJSONArray("flexColumns");
++      if (cols == null || cols.length() == 0) return null;
++      StringBuilder artists = new StringBuilder();
++      for (int i = 0; i < cols.length(); i++) {
++        JSONObject col =
++            cols.optJSONObject(i)
++                .optJSONObject("musicResponsiveListItemFlexColumnRenderer");
++        if (col == null) continue;
++        JSONArray runs = col.optJSONObject("text") == null ? null : col.optJSONObject("text").optJSONArray("runs");
++        if (runs == null) continue;
++        for (int r = 0; r < runs.length(); r++) {
++          JSONObject run = runs.optJSONObject(r);
++          if (run == null) continue;
++          String text = run.optString("text", "");
++          if (i == 0) {
++            if (c.title.isEmpty()) c.title = text;
++            if (c.videoId.isEmpty()) {
++              JSONObject nav = run.optJSONObject("navigationEndpoint");
++              if (nav != null && nav.optJSONObject("watchEndpoint") != null)
++                c.videoId = nav.optJSONObject("watchEndpoint").optString("videoId", "");
++            }
++          } else {
++            Matcher m = TIME.matcher(text.trim());
++            if (m.matches()) {
++              double t = Integer.parseInt(m.group(1)) * 60 + Integer.parseInt(m.group(2));
++              if (m.group(3) != null) t = t * 60 + Integer.parseInt(m.group(3));
++              c.duration = t;
++            } else if (!"•".equals(text.trim())) {
++              artists.append(text).append(' ');
++            }
++          }
++        }
++      }
++      c.artists = artists.toString();
++      return c.videoId.isEmpty() || c.title.isEmpty() ? null : c;
++    } catch (Exception e) {
++      return null;
++    }
++  }
++
++  private static class YtClient {
++    final String name, version, userAgent;
++    final JSONObject extra;
++
++    YtClient(String name, String version, String userAgent, JSONObject extra) {
++      this.name = name;
++      this.version = version;
++      this.userAgent = userAgent;
++      this.extra = extra;
++    }
++  }
++
++  private List<YtClient> cascade() throws Exception {
++    List<YtClient> clients = new ArrayList<>();
++    clients.add(
++        new YtClient(
++            "ANDROID_VR",
++            "1.65.10",
++            "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
++            new JSONObject()
++                .put("deviceMake", "Oculus")
++                .put("deviceModel", "Quest 3")
++                .put("osName", "Android")
++                .put("osVersion", "12L")
++                .put("androidSdkVersion", 32)));
++    clients.add(
++        new YtClient(
++            "ANDROID_VR",
++            "1.43.32",
++            "com.google.android.apps.youtube.vr.oculus/1.43.32 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
++            new JSONObject()
++                .put("deviceMake", "Oculus")
++                .put("deviceModel", "Quest 3")
++                .put("osName", "Android")
++                .put("osVersion", "12L")
++                .put("androidSdkVersion", 32)));
++    clients.add(
++        new YtClient(
++            "IOS",
++            "19.45.4",
++            "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
++            new JSONObject()
++                .put("deviceMake", "Apple")
++                .put("deviceModel", "iPhone16,2")
++                .put("osName", "iOS")
++                .put("osVersion", "18.1.0.22B83")));
++    return clients;
++  }
++
++  private String streamUrl(String videoId, String mediaId) throws Exception {
++    for (YtClient yc : cascade()) {
++      try {
++        JSONObject client =
++            new JSONObject()
++                .put("clientName", yc.name)
++                .put("clientVersion", yc.version)
++                .put("hl", "en")
++                .put("gl", "IN");
++        JSONArray extraNames = yc.extra.names();
++        if (extraNames != null)
++          for (int i = 0; i < extraNames.length(); i++) {
++            String k = extraNames.optString(i);
++            client.put(k, yc.extra.get(k));
++          }
++        JSONObject body =
++            new JSONObject()
++                .put("context", new JSONObject().put("client", client))
++                .put("videoId", videoId)
++                .put("contentCheckOk", true)
++                .put("racyCheckOk", true);
++        JSONObject res =
++            post("https://music.youtube.com/youtubei/v1/player?prettyPrint=false", body, yc.userAgent);
++        JSONObject status = res.optJSONObject("playabilityStatus");
++        if (status == null || !"OK".equals(status.optString("status"))) continue;
++        JSONObject streaming = res.optJSONObject("streamingData");
++        if (streaming == null) continue;
++        JSONArray formats = streaming.optJSONArray("adaptiveFormats");
++        if (formats == null) continue;
++        JSONObject best = null;
++        for (int i = 0; i < formats.length(); i++) {
++          JSONObject f = formats.optJSONObject(i);
++          if (f == null || !f.optString("mimeType").startsWith("audio/")) continue;
++          if (f.optString("url").isEmpty()) continue; // ciphered — client can't use it
++          if (best == null) {
++            best = f;
++            continue;
++          }
++          boolean bestOpus = best.optInt("itag") == 251, fOpus = f.optInt("itag") == 251;
++          if (fOpus && !bestOpus) best = f; // prefer opus 251 outright
++          else if (fOpus == bestOpus && f.optInt("bitrate") > best.optInt("bitrate")) best = f;
++        }
++        if (best == null) continue;
++        long ttl = 0;
++        try {
++          ttl = Long.parseLong(streaming.optString("expiresInSeconds", "0"));
++        } catch (NumberFormatException ignored) {
++        }
++        long expires = System.currentTimeMillis() + Math.max(60, ttl - 60) * 1000L;
++        String url = best.optString("url");
++        urls.put(mediaId, new Resolved(url, expires));
++        markVia(mediaId, true);
++        return url;
++      } catch (Exception ignored) {
++        // next client in the cascade takes over
++      }
++    }
++    throw new IOException("YouTube cascade exhausted for " + videoId);
++  }
++
++  // ------------------------------------------------------------------- http
++
++  private JSONObject post(String url, JSONObject body, String userAgent) throws Exception {
++    HttpURLConnection con = null;
++    try {
++      con = (HttpURLConnection) new URL(url).openConnection();
++      con.setConnectTimeout(12000);
++      con.setReadTimeout(15000);
++      con.setDoOutput(true);
++      con.setRequestMethod("POST");
++      con.setRequestProperty("Content-Type", "application/json");
++      con.setRequestProperty("User-Agent", userAgent);
++      con.setRequestProperty("Origin", "https://music.youtube.com");
++      con.setRequestProperty("Referer", "https://music.youtube.com/");
++      byte[] payload = body.toString().getBytes(StandardCharsets.UTF_8);
++      try (OutputStream out = con.getOutputStream()) {
++        out.write(payload);
++      }
++      ByteArrayOutputStream buf = new ByteArrayOutputStream();
++      try (InputStream in = con.getInputStream()) {
++        byte[] b = new byte[8192];
++        int n;
++        while ((n = in.read(b)) != -1) {
++          buf.write(b, 0, n);
++          if (buf.size() > 8 * 1024 * 1024) throw new IOException("Response too large");
++        }
++      }
++      return new JSONObject(buf.toString("UTF-8"));
++    } finally {
++      if (con != null) con.disconnect();
++    }
++  }
++
++  private static String plain(String html) {
++    return android.text.Html.fromHtml(html == null ? "" : html).toString();
++  }
++}
+diff --git a/music-app/android/app/src/test/java/dev/viswesh/vibex/audio/YtMatcherTest.java b/music-app/android/app/src/test/java/dev/viswesh/vibex/audio/YtMatcherTest.java
+new file mode 100644
+index 0000000..ba51fd8
+--- /dev/null
++++ b/music-app/android/app/src/test/java/dev/viswesh/vibex/audio/YtMatcherTest.java
+@@ -0,0 +1,66 @@
++package dev.viswesh.vibex.audio;
++
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++
++/**
++ * Cross-source matcher rules for the JioSaavn → YouTube takeover. Pure JVM —
++ * no Robolectric needed. Thresholds: songs phase 0.55, video rescue 0.65.
++ */
++public class YtMatcherTest {
++
++  @Test
++  public void exactAlbumTrackScoresHigh() {
++    double s = YtFallback.score("Tum Hi Ho", "Arijit Singh", 262, "Tum Hi Ho", "Arijit Singh", 261);
++    assertTrue("exact match should clear songs threshold, got " + s, s >= YtFallback.ACCEPT_SONGS);
++  }
++
++  @Test
++  public void noisyYouTubeTitleStillMatches() {
++    double s =
++        YtFallback.score(
++            "Hukum",
++            "Anirudh Ravichander",
++            188,
++            "Hukum (Official Lyric Video)",
++            "Anirudh Ravichander • Jailer",
++            190);
++    assertTrue("noise-stripped title should match, got " + s, s >= YtFallback.ACCEPT_SONGS);
++  }
++
++  @Test
++  public void coverVersionIsRejected() {
++    double s =
++        YtFallback.score(
++            "Tum Hi Ho", "Arijit Singh", 262, "Tum Hi Ho (Cover)", "Random Singer", 250);
++    assertTrue("cover with wrong artist must fail threshold, got " + s, s < YtFallback.ACCEPT_SONGS);
++  }
++
++  @Test
++  public void differentRecordingLengthIsPenalized() {
++    double s =
++        YtFallback.score(
++            "Vaathi Coming", "Anirudh Ravichander", 223, "Vaathi Coming", "Anirudh Ravichander", 410);
++    double close =
++        YtFallback.score(
++            "Vaathi Coming", "Anirudh Ravichander", 223, "Vaathi Coming", "Anirudh Ravichander", 224);
++    assertTrue("duration drift must lower the score", close > s);
++  }
++
++  @Test
++  public void sameTitleDifferentSongIsRejected() {
++    double s = YtFallback.score("Kesariya", "Arijit Singh", 268, "Kesariya Dance Mix", "DJ Unknown", 180);
++    assertTrue("remix by another artist must fail, got " + s, s < YtFallback.ACCEPT_SONGS);
++  }
++
++  @Test
++  public void videoRescueThresholdIsStricterThanSongs() {
++    assertTrue(YtFallback.ACCEPT_VIDEOS > YtFallback.ACCEPT_SONGS);
++  }
++
++  @Test
++  public void normalizeStripsFilmNoise() {
++    assertTrue(YtFallback.normalize("Hukum (Official Lyric Video) [4K HD]").startsWith("hukum"));
++  }
++}
+diff --git a/music-app/android/gradle.properties b/music-app/android/gradle.properties
+index a55b5a4..1ceba8e 100644
+--- a/music-app/android/gradle.properties
++++ b/music-app/android/gradle.properties
+@@ -28,3 +28,4 @@ org.gradle.workers.max=1
+ org.gradle.caching=true
+ org.gradle.daemon=false
+ android.enableJetifier=false
++org.gradle.java.installations.paths=/home/user/.tools/jdk17,/home/user/.tools/jdk21
+diff --git a/music-app/android/vibex-testing.keystore b/music-app/android/vibex-testing.keystore
+new file mode 100644
+index 0000000000000000000000000000000000000000..02261dee5a99d1b7db9038774cfd999355f90059
+GIT binary patch
+literal 2758
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/music-app/src/lib/http.js b/music-app/src/lib/http.js
+index f033e19..c028975 100644
+--- a/music-app/src/lib/http.js
++++ b/music-app/src/lib/http.js
+@@ -23,7 +23,9 @@
+  * Recursion is now prevented by only installing when a native implementation
+  * is advertised; see nativeHttpAdvertised().
+  */
+-const NATIVE_HOSTS = /(^|\.)jiosaavn\.com$/i
++// jiosaavn.com: embedded API metadata. kugou.com: lyrics provider — neither
++// sends CORS headers, so both must leave the WebView through the native stack.
++const NATIVE_HOSTS = /(^|\.)(jiosaavn|kugou)\.com$/i
+ 
+ let installed = false
+ 
+diff --git a/music-app/src/v2/Player.jsx b/music-app/src/v2/Player.jsx
+index 65abc91..ebd9dc7 100644
+--- a/music-app/src/v2/Player.jsx
++++ b/music-app/src/v2/Player.jsx
+@@ -324,12 +324,16 @@ export function Lyrics() {
+           title={
+             result?.type === "instrumental"
+               ? "Let the music speak"
+-              : "No matching lyrics yet"
++              : result?.type === "error"
++                ? "Lyrics sources unreachable"
++                : "No matching lyrics yet"
+           }
+           description={
+             result?.type === "instrumental"
+               ? "This recording is marked as instrumental."
+-              : "We won’t show lyrics from a different recording. Try again or check your enabled sources."
++              : result?.type === "error"
++                ? "Every enabled source failed to respond — check your connection and retry."
++                : "We won’t show lyrics from a different recording. Try again or check your enabled sources."
+           }
+         >
+           <button className="secondary" onClick={() => setRetry((n) => n + 1)}>
+@@ -351,10 +355,24 @@ export function Player({ onClose, onMenu, tab, setTab }) {
+     <div
+       ref={dialog}
+       className="player-page"
++      data-style={settings.playerStyle || "classic"}
+       role="dialog"
+       aria-modal="true"
+       aria-label="Now playing"
+     >
++      {settings.playerStyle === "aurora" && (
++        <div
++          className="aurora-bg"
++          aria-hidden="true"
++          style={
++            current?.image?.length
++              ? {
++                  backgroundImage: `url(${current.image[current.image.length - 1]?.url || ""})`,
++                }
++              : undefined
++          }
++        />
++      )}
+       <div
+         className="player-top"
+         onTouchStart={(e) => (touch.current = e.touches[0].clientY)}
+@@ -520,6 +538,14 @@ export function Player({ onClose, onMenu, tab, setTab }) {
+             <span className="quality-pill">
+               {current?.local ? "LOCAL" : settings.quality}
+             </span>
++            {state.viaYoutube && (
++              <span
++                className="quality-pill yt-pill"
++                title="JioSaavn stream was unavailable; playing a matched YouTube audio stream"
++              >
++                via YouTube
++              </span>
++            )}
+           </div>
+           {state.error && (
+             <p className="player-error" role="alert">
+diff --git a/music-app/src/v2/SettingsView.jsx b/music-app/src/v2/SettingsView.jsx
+index fa85aac..9eeeda6 100644
+--- a/music-app/src/v2/SettingsView.jsx
++++ b/music-app/src/v2/SettingsView.jsx
+@@ -9,6 +9,7 @@ import {
+   Trash2,
+   Upload,
+   SlidersHorizontal,
++  Radio,
+ } from "lucide-react";
+ import { useVibe } from "./Model.jsx";
+ import { Audio, native } from "./native.js";
+@@ -176,6 +177,19 @@ export function SettingsView() {
+                 <option value="dark">Midnight</option>
+               </select>
+             </label>
++            <label className="setting-row">
++              <span>
++                <Sun />
++                <b>Player style</b>
++              </span>
++              <select
++                value={settings.playerStyle}
++                onChange={(e) => setSetting("playerStyle", e.target.value)}
++              >
++                <option value="classic">Classic</option>
++                <option value="aurora">Aurora glass</option>
++              </select>
++            </label>
+             <label className="setting-row">
+               <span>
+                 <Music2 />
+@@ -207,6 +221,28 @@ export function SettingsView() {
+               lock the screen. Reopening Vibex or tapping its media notification
+               returns to the current song. Paused songs stay paused.
+             </p>
++            <label className="setting-row">
++              <span>
++                <Radio />
++                <b>Audio source</b>
++              </span>
++              <select
++                value={settings.audioSource}
++                onChange={(e) => setSetting("audioSource", e.target.value)}
++              >
++                <option value="auto">Auto — JioSaavn, YouTube rescue</option>
++                <option value="saavn">JioSaavn only</option>
++                <option value="youtube">YouTube first</option>
++              </select>
++            </label>
++            <p className="setting-note">
++              Where the sound itself streams from, on Android. Search, library
++              and artwork always come from JioSaavn. YouTube first matches each
++              track confidently before streaming its audio — when no confident
++              match exists, JioSaavn rescues the track (and the other way
++              around on Auto). Downloads always prefer JioSaavn bytes at your
++              chosen bitrate.
++            </p>
+             <label className="setting-row">
+               <span>
+                 <Headphones />
+@@ -289,7 +325,7 @@ export function SettingsView() {
+             </p>
+             {[
+               ...settings.lyricsProviders,
+-              ...["local", "lrclib-exact", "lrclib-search"].filter(
++              ...["local", "lrclib-exact", "lrclib-search", "kugou"].filter(
+                 (id) => !settings.lyricsProviders.includes(id),
+               ),
+             ].map((id) => (
+@@ -300,14 +336,18 @@ export function SettingsView() {
+                       ? "Your imported LRC / text"
+                       : id === "lrclib-exact"
+                         ? "LRCLIB · Exact recording"
+-                        : "LRCLIB · Matched search"}
++                        : id === "lrclib-search"
++                          ? "LRCLIB · Matched search"
++                          : "KuGou · Community synced"}
+                   </b>
+                   <small>
+                     {id === "local"
+                       ? "Attached to this track; included in your library backup"
+                       : id === "lrclib-exact"
+                         ? "Title, album, artist and duration"
+-                        : "Fallback when an exact lookup has no result"}
++                        : id === "lrclib-search"
++                          ? "Fallback when an exact lookup has no result"
++                          : "Login-free; strong for Indian and Asian catalogs"}
+                   </small>
+                 </span>
+                 <input
+diff --git a/music-app/src/v2/core.js b/music-app/src/v2/core.js
+index 3c9a1ed..d684e42 100644
+--- a/music-app/src/v2/core.js
++++ b/music-app/src/v2/core.js
+@@ -15,8 +15,10 @@ export const defaults = {
+   crossfade: 3,
+   stats: true,
+   eq: "Flat",
+-  lyricsProviders: ["local", "lrclib-exact", "lrclib-search"],
++  lyricsProviders: ["local", "lrclib-exact", "lrclib-search", "kugou"],
+   lyricOffset: 0,
++  playerStyle: "classic",
++  audioSource: "auto",
+   stopOnDismiss: false,
+   cacheMB: 128,
+ };
+@@ -153,11 +155,17 @@ export function cleanSettings(s = {}) {
+       ? [
+           ...new Set(
+             s.lyricsProviders.filter((p) =>
+-              ["local", "lrclib-exact", "lrclib-search"].includes(p),
++              ["local", "lrclib-exact", "lrclib-search", "kugou"].includes(p),
+             ),
+           ),
+         ]
+       : defaults.lyricsProviders,
++    playerStyle: ["classic", "aurora"].includes(s.playerStyle)
++      ? s.playerStyle
++      : defaults.playerStyle,
++    audioSource: ["auto", "saavn", "youtube"].includes(s.audioSource)
++      ? s.audioSource
++      : defaults.audioSource,
+   };
+ }
+ export function validateBackup(input) {
+diff --git a/music-app/src/v2/lyrics.js b/music-app/src/v2/lyrics.js
+index 5a794ef..5937995 100644
+--- a/music-app/src/v2/lyrics.js
++++ b/music-app/src/v2/lyrics.js
+@@ -2,58 +2,236 @@ import { lyricScore } from "./core.js";
+ import { artistsOf } from "../lib/song.js";
+ import { decodeHtml } from "../lib/format.js";
+ import { parseLRC } from "../lib/lrc.js";
++
++/**
++ * Multi-provider lyrics with a user-ordered fallback chain.
++ *
++ * Every provider is login-free. Providers run strictly in the user's order
++ * (Settings → Lyrics); the first confident hit wins. A synced result returns
++ * immediately; a plain-text result from an earlier provider is kept as a
++ * fallback while later providers are still given the chance to find a synced
++ * one — synced beats unsynced across the whole chain.
++ *
++ * KuGou has no CORS headers, so on-device those requests ride the native
++ * HTTP patch (see lib/http.js); in a plain browser the provider simply fails
++ * and the chain moves on.
++ */
++
++/** Decode KuGou's base64 LRC payload as UTF-8 (atob alone mangles non-ASCII). */
++export function decodeBase64Utf8(b64) {
++  const bin = atob(b64.replace(/\s/g, ""));
++  const bytes = new Uint8Array(bin.length);
++  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
++  return new TextDecoder("utf-8").decode(bytes);
++}
++
++/**
++ * Who actually sings this? JioSaavn's `artists.primary` leads with the music
++ * director for most Indian releases (Mithoon before Arijit Singh on
++ * "Tum Hi Ho"), while LRCLIB and KuGou tag lyrics by the performing singer —
++ * querying by composer made every lookup miss. Prefer entries with the
++ * `singer` role, keep the primary credits as fallbacks, and let scoring try
++ * each candidate.
++ */
++export function artistCandidates(song) {
++  const names = [
++    ...(song.artists?.all || [])
++      .filter((a) => a?.role === "singer")
++      .map((a) => a.name),
++    ...(song.artists?.primary || []).map((a) => a.name),
++    decodeHtml(artistsOf(song)).split(",")[0],
++  ]
++    .map((n) => decodeHtml(String(n || "")).trim())
++    .filter(Boolean);
++  return [...new Set(names)].slice(0, 4);
++}
++
++/** 0..1 confidence that a KuGou candidate is the same recording. */
++export function kugouScore(candidate, { title, artist, duration }) {
++  const norm = (s) =>
++    String(s || "")
++      .toLowerCase()
++      .replace(/[^\p{L}\p{N} ]/gu, " ")
++      .replace(/\s+/g, " ")
++      .trim();
++  const song = norm(candidate.song),
++    qt = norm(title);
++  if (!song || !qt) return 0;
++  const ta = new Set(qt.split(" ")),
++    tb = new Set(song.split(" "));
++  const inter = [...ta].filter((t) => tb.has(t)).length;
++  let s = 0.55 * (inter / Math.max(1, Math.min(ta.size, tb.size)));
++  const singer = norm(candidate.singer);
++  if (artist && (singer.includes(norm(artist)) || song.includes(norm(artist))))
++    s += 0.25;
++  const cd = (candidate.duration || 0) / 1000;
++  if (duration && cd) {
++    const d = Math.abs(duration - cd);
++    s += d <= 2 ? 0.2 : d <= 5 ? 0.12 : d <= 12 ? 0.05 : 0;
++  } else s += 0.1;
++  return Math.min(1, s);
++}
++
++const timedFetch = async (url, signal, ms = 7000) => {
++  const ctl = new AbortController(),
++    abort = () => ctl.abort(),
++    timer = setTimeout(abort, ms);
++  signal?.addEventListener("abort", abort, { once: true });
++  try {
++    return await fetch(url, { signal: ctl.signal });
++  } finally {
++    clearTimeout(timer);
++    signal?.removeEventListener("abort", abort);
++  }
++};
++
++/* ---------------------------------------------------------------- LRCLIB */
++
++/** Best score across every plausible artist — composer, singer, feature. */
++const bestScore = (h, { title, artists, duration }) =>
++  Math.max(
++    ...artists.map((artist) =>
++      lyricScore(h, { name: title, artist, duration }),
++    ),
++  );
++
++function pickLrclibHit(hits, query) {
++  const ranked = hits
++    .filter(Boolean)
++    .map((h) => ({ h, score: bestScore(h, query) }))
++    .filter((x) => x.score >= 0.63)
++    .sort((a, b) => b.score - a.score);
++  // A synced hit always beats a plain or instrumental-flagged one: LRCLIB
++  // carries community-submitted junk rows (popular songs wrongly flagged
++  // instrumental), so "instrumental" is only trusted when nothing else fits.
++  return (
++    ranked.find((x) => parseLRC(x.h.syncedLyrics).length)?.h ||
++    ranked.find((x) => x.h.plainLyrics && !x.h.instrumental)?.h ||
++    ranked[0]?.h ||
++    null
++  );
++}
++
++function hitToResult(hit) {
++  if (!hit) return null;
++  const lines = parseLRC(hit.syncedLyrics);
++  if (lines.length) return { type: "synced", lines };
++  if (hit.instrumental) return { type: "instrumental" };
++  if (hit.plainLyrics) return { type: "plain", text: hit.plainLyrics };
++  return null;
++}
++
++async function lrclib(kind, query, signal) {
++  const { title, artists, album, duration } = query;
++  if (kind === "exact") {
++    // /api/get is a strict lookup, so the artist must be the one LRCLIB has
++    // on file — try the likeliest two candidates (singer first).
++    const hits = [];
++    for (const artist of artists.slice(0, 2)) {
++      const r = await timedFetch(
++        `https://lrclib.net/api/get?${new URLSearchParams({ track_name: title, artist_name: artist, album_name: album, duration: Math.round(duration || 0) })}`,
++        signal,
++      );
++      if (r.status === 404) continue;
++      if (!r.ok) throw Error("Lyrics unavailable");
++      hits.push(await r.json());
++      // A singer-tagged synced hit is what we want; stop as soon as one fits.
++      if (pickLrclibHit(hits, query)) break;
++    }
++    return hitToResult(pickLrclibHit(hits, query));
++  }
++  // Search by title alone for recall — local scoring (title overlap, any
++  // credited artist, duration drift ≤ 15 s) still refuses wrong recordings.
++  const r = await timedFetch(
++    `https://lrclib.net/api/search?${new URLSearchParams({ track_name: title })}`,
++    signal,
++  );
++  if (r.status === 404) return null;
++  if (!r.ok) throw Error("Lyrics unavailable");
++  const hits = await r.json();
++  return hitToResult(pickLrclibHit(Array.isArray(hits) ? hits : [hits], query));
++}
++
++/* ----------------------------------------------------------------- KuGou */
++
++async function kugou({ title, artists, duration }, signal) {
++  const search = await timedFetch(
++    `https://krcs.kugou.com/search?${new URLSearchParams({ ver: 1, man: "yes", client: "mobi", keyword: `${artists[0]} - ${title}`, duration: Math.round((duration || 0) * 1000) })}`,
++    signal,
++  );
++  if (!search.ok) throw Error("Lyrics unavailable");
++  const data = await search.json();
++  const ranked = (data.candidates || [])
++    .map((c) => ({
++      c,
++      score: Math.max(
++        ...artists.map((artist) =>
++          kugouScore(c, { title, artist, duration }),
++        ),
++      ),
++    }))
++    .filter((x) => x.score >= 0.6)
++    .sort((a, b) => b.score - a.score);
++  const hit = ranked[0]?.c;
++  if (!hit) return null;
++  const dl = await timedFetch(
++    `https://krcs.kugou.com/download?${new URLSearchParams({ ver: 1, man: "yes", client: "pc", fmt: "lrc", id: hit.id, accesskey: hit.accesskey })}`,
++    signal,
++  );
++  if (!dl.ok) throw Error("Lyrics unavailable");
++  const body = await dl.json();
++  if (!body.content) return null;
++  const lines = parseLRC(decodeBase64Utf8(body.content)).filter(
++    // KuGou embeds credit lines; drop obvious metadata rows.
++    (l) => !/^(作词|作曲|编曲|词|曲)\s*[:：]/.test(l.text || ""),
++  );
++  if (lines.length) return { type: "synced", lines };
++  return null;
++}
++
++/* ----------------------------------------------------------------- chain */
++
++export const PROVIDERS = {
++  "lrclib-exact": (song, signal) => lrclib("exact", song, signal),
++  "lrclib-search": (song, signal) => lrclib("search", song, signal),
++  kugou: (song, signal) => kugou(song, signal),
++};
++
+ export async function findLyrics(song, providers, signal, manual = null) {
+-  const title = decodeHtml(song.name),
+-    artist = decodeHtml(artistsOf(song)).split(",")[0];
+-  const urls = {
+-    "lrclib-exact": `https://lrclib.net/api/get?${new URLSearchParams({ track_name: title, artist_name: artist, album_name: decodeHtml(song.album?.name || ""), duration: Math.round(song.duration || 0) })}`,
+-    "lrclib-search": `https://lrclib.net/api/search?${new URLSearchParams({ track_name: title, artist_name: artist })}`,
++  const query = {
++    title: decodeHtml(song.name),
++    artists: artistCandidates(song),
++    album: decodeHtml(song.album?.name || ""),
++    duration: song.duration || 0,
+   };
+-  const online = providers.filter((p) => p in urls);
++  const online = providers.filter((p) => p in PROVIDERS);
+   let failed = 0;
++  // Unsynced or instrumental hits wait while later providers race for a
++  // synced one; synced beats plain beats instrumental across the chain.
++  let plainFallback = null;
++  let instrumentalFallback = null;
+   for (const provider of providers) {
+     if (provider === "local") {
+       if (manual) return manual;
+       continue;
+     }
+-    if (!(provider in urls)) continue;
++    if (!(provider in PROVIDERS)) continue;
+     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+     try {
+-      const ctl = new AbortController(),
+-        abort = () => ctl.abort(),
+-        timer = setTimeout(abort, 7000);
+-      signal?.addEventListener("abort", abort, { once: true });
+-      let hits;
+-      try {
+-        const r = await fetch(urls[provider], { signal: ctl.signal });
+-        if (r.status === 404) continue;
+-        if (!r.ok) throw Error("Lyrics unavailable");
+-        hits = await r.json();
+-      } finally {
+-        clearTimeout(timer);
+-        signal?.removeEventListener("abort", abort);
+-      }
+-      hits = Array.isArray(hits) ? hits : [hits];
+-      const ranked = hits
+-        .map((h) => ({
+-          h,
+-          score: lyricScore(h, { ...song, name: title, artist }),
+-        }))
+-        .filter((x) => x.score >= 0.63)
+-        .sort((a, b) => b.score - a.score);
+-      const hit = ranked[0]?.h;
+-      if (hit) {
+-        const lines = parseLRC(hit.syncedLyrics);
+-        if (hit.instrumental) return { type: "instrumental", provider };
+-        if (lines.length) return { type: "synced", lines, provider };
+-        if (hit.plainLyrics)
+-          return { type: "plain", text: hit.plainLyrics, provider };
+-      }
++      const result = await PROVIDERS[provider](query, signal);
++      if (!result) continue;
++      if (result.type === "synced") return { ...result, provider };
++      if (result.type === "instrumental") {
++        if (!instrumentalFallback)
++          instrumentalFallback = { ...result, provider };
++      } else if (!plainFallback) plainFallback = { ...result, provider };
+     } catch (e) {
+       if (signal?.aborted) throw e;
+       failed++;
+     }
+   }
++  if (plainFallback) return plainFallback;
++  if (instrumentalFallback) return instrumentalFallback;
+   return {
+     type: failed === online.length && online.length ? "error" : "none",
+   };
+diff --git a/music-app/src/v2/theme.css b/music-app/src/v2/theme.css
+index 7305072..71dcc4e 100644
+--- a/music-app/src/v2/theme.css
++++ b/music-app/src/v2/theme.css
+@@ -3344,3 +3344,99 @@ html[data-saver="true"] .sheet-backdrop {
+ .playlist-edit {
+   flex-wrap: wrap;
+ }
++
++/* ===================== test6 · Liquid Glass ===================== */
++/* Glass tokens. Opaque fallbacks keep pre-blur WebViews fully usable. */
++:root {
++  --glass-surface: rgba(255, 255, 255, 0.55);
++  --glass-strong: rgba(255, 255, 255, 0.72);
++  --glass-edge: rgba(255, 255, 255, 0.65);
++  --glass-shadow: 0 18px 50px rgba(32, 20, 80, 0.16);
++}
++[data-theme="dark"] {
++  --glass-surface: rgba(22, 20, 34, 0.55);
++  --glass-strong: rgba(24, 22, 38, 0.72);
++  --glass-edge: rgba(255, 255, 255, 0.14);
++  --glass-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
++}
++
++/* Glass chrome: top bar gets the signature translucent blur. */
++@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
++  .topbar {
++    background: var(--glass-surface);
++    -webkit-backdrop-filter: blur(22px) saturate(1.5);
++    backdrop-filter: blur(22px) saturate(1.5);
++    border-bottom: 1px solid var(--glass-edge);
++  }
++}
++
++/* "via YouTube" takeover badge. */
++.yt-pill {
++  background: #ff00331a;
++  color: #c4003a;
++  border: 1px solid #ff003330;
++}
++[data-theme="dark"] .yt-pill {
++  background: #ff476920;
++  color: #ff8aa1;
++  border-color: #ff476940;
++}
++
++/* ---------------- Aurora glass player (full-bleed blurred artwork) ---- */
++.aurora-bg {
++  position: absolute;
++  inset: -40px;
++  z-index: 0;
++  background-size: cover;
++  background-position: center;
++  background-color: var(--accent-deep);
++  filter: blur(56px) saturate(1.7) brightness(0.92);
++  transform: scale(1.15);
++  pointer-events: none;
++}
++[data-theme="dark"] .aurora-bg {
++  filter: blur(56px) saturate(1.6) brightness(0.55);
++}
++.player-page[data-style="aurora"] {
++  background: var(--accent-deep);
++}
++.player-page[data-style="aurora"] > *:not(.aurora-bg) {
++  position: relative;
++  z-index: 1;
++}
++/* Content floats on glass cards above the artwork wash. */
++.player-page[data-style="aurora"] .player-main,
++.player-page[data-style="aurora"] .player-secondary {
++  background: var(--glass-strong);
++  border: 1px solid var(--glass-edge);
++  border-radius: 26px;
++  padding: 18px;
++  box-shadow: var(--glass-shadow);
++}
++@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
++  .player-page[data-style="aurora"] .player-main,
++  .player-page[data-style="aurora"] .player-secondary {
++    background: var(--glass-surface);
++    -webkit-backdrop-filter: blur(26px) saturate(1.6);
++    backdrop-filter: blur(26px) saturate(1.6);
++  }
++}
++.player-page[data-style="aurora"] .player-top {
++  color: #fff;
++  text-shadow: 0 1px 14px rgba(0, 0, 0, 0.35);
++}
++.player-page[data-style="aurora"] .player-top small,
++.player-page[data-style="aurora"] .player-top strong {
++  color: #fff;
++}
++.player-page[data-style="aurora"] .player-art {
++  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
++  border-radius: 22px;
++}
++/* Specular rim on the artwork — the "physical glass" cue. (Cover renders an
++   <img>, so pseudo-elements can't be used; a real border + outline does it.) */
++.player-page[data-style="aurora"] .player-art {
++  border: 1px solid rgba(255, 255, 255, 0.35);
++  outline: 1px solid rgba(0, 0, 0, 0.12);
++  outline-offset: -2px;
++}
+diff --git a/music-app/tests/e2e/app.spec.js b/music-app/tests/e2e/app.spec.js
+index b0a33a1..6f5889f 100644
+--- a/music-app/tests/e2e/app.spec.js
++++ b/music-app/tests/e2e/app.spec.js
+@@ -997,3 +997,22 @@ test("test4 app return preserves an unfinished playlist dialog", async ({
+     page.getByRole("dialog", { name: "Now playing" }),
+   ).not.toBeVisible();
+ });
++
++test("test7 audio source setting offers all three services and persists", async ({
++  page,
++}) => {
++  await page.goto("/");
++  await page.getByRole("button", { name: "Settings", exact: true }).click();
++  const source = page.getByLabel("Audio source", { exact: false });
++  await expect(source).toHaveValue("auto");
++  await expect(source.locator("option")).toHaveCount(3);
++  await source.selectOption("youtube");
++  await expect
++    .poll(async () => (await readStored(page))?.settings.audioSource)
++    .toBe("youtube");
++  await page.reload();
++  await page.getByRole("button", { name: "Settings", exact: true }).click();
++  await expect(page.getByLabel("Audio source", { exact: false })).toHaveValue(
++    "youtube",
++  );
++});
+diff --git a/music-app/tests/test6.test.mjs b/music-app/tests/test6.test.mjs
+new file mode 100644
+index 0000000..f782aa4
+--- /dev/null
++++ b/music-app/tests/test6.test.mjs
+@@ -0,0 +1,197 @@
++// test6: lyrics provider chain + player style setting + KuGou helpers.
++import test from "node:test";
++import assert from "node:assert/strict";
++import { cleanSettings, defaults } from "../src/v2/core.js";
++
++// findLyrics reaches decodeHtml, which uses a DOM textarea; give node the
++// minimal shim (entity decoding is exercised by its own browser e2e tests).
++global.document ??= {
++  createElement: () => {
++    let h = "";
++    return {
++      set innerHTML(v) {
++        h = v;
++      },
++      get value() {
++        return h.replace(/&amp;/g, "&").replace(/&quot;/g, '"');
++      },
++    };
++  },
++};
++const { decodeBase64Utf8, kugouScore, PROVIDERS, artistCandidates, findLyrics } =
++  await import("../src/v2/lyrics.js");
++
++test("defaults include the KuGou provider and classic player style", () => {
++  assert.ok(defaults.lyricsProviders.includes("kugou"));
++  assert.equal(defaults.playerStyle, "classic");
++});
++
++test("cleanSettings keeps kugou and drops unknown providers", () => {
++  const s = cleanSettings({
++    ...defaults,
++    lyricsProviders: ["kugou", "lrclib-exact", "bogus", "local"],
++  });
++  assert.deepEqual(s.lyricsProviders, ["kugou", "lrclib-exact", "local"]);
++});
++
++test("cleanSettings validates playerStyle", () => {
++  assert.equal(
++    cleanSettings({ ...defaults, playerStyle: "aurora" }).playerStyle,
++    "aurora",
++  );
++  assert.equal(
++    cleanSettings({ ...defaults, playerStyle: "neon" }).playerStyle,
++    "classic",
++  );
++});
++
++test("legacy settings without playerStyle get the classic default", () => {
++  const s = cleanSettings({ ...defaults, playerStyle: undefined });
++  assert.equal(s.playerStyle, "classic");
++});
++
++test("decodeBase64Utf8 survives non-ASCII lyrics", () => {
++  const text = "நான் பாடுவேன் [00:01.00] வணக்கம் 你好";
++  const b64 = Buffer.from(text, "utf-8").toString("base64");
++  assert.equal(decodeBase64Utf8(b64), text);
++});
++
++test("kugouScore prefers the matching recording", () => {
++  const query = { title: "Tum Hi Ho", artist: "Arijit Singh", duration: 262 };
++  const good = kugouScore(
++    { song: "Tum Hi Ho", singer: "Arijit Singh", duration: 261000 },
++    query,
++  );
++  const wrong = kugouScore(
++    { song: "Tum Hi Ho Remix DJ", singer: "Somebody", duration: 190000 },
++    query,
++  );
++  assert.ok(good >= 0.6, `good=${good}`);
++  assert.ok(good > wrong, `good=${good} wrong=${wrong}`);
++});
++
++test("provider registry exposes exactly the login-free online providers", () => {
++  assert.deepEqual(
++    Object.keys(PROVIDERS).sort(),
++    ["kugou", "lrclib-exact", "lrclib-search"].sort(),
++  );
++});
++
++// --- regression: device bug "lyrics is not loading" (test6 field report) ---
++
++// JioSaavn credits the composer first; LRCLIB/KuGou tag lyrics by singer.
++const tumHiHo = {
++  name: "Tum Hi Ho",
++  duration: 262,
++  album: { name: "Aashiqui 2" },
++  artists: {
++    primary: [{ name: "Mithoon" }, { name: "Arijit Singh" }],
++    all: [
++      { name: "Mithoon", role: "music" },
++      { name: "Arijit Singh", role: "singer" },
++      { name: "Mithoon", role: "lyricist" },
++    ],
++  },
++};
++
++test("artistCandidates puts the singer ahead of the composer", () => {
++  assert.deepEqual(artistCandidates(tumHiHo), ["Arijit Singh", "Mithoon"]);
++});
++
++test("a junk instrumental-flagged LRCLIB row no longer ends the chain", async () => {
++  const realFetch = global.fetch;
++  global.fetch = async (url) => {
++    const u = String(url);
++    if (u.includes("/api/get")) {
++      // Composer-keyed junk row: right title/duration, flagged instrumental.
++      if (u.includes("Mithoon"))
++        return Response.json({
++          trackName: "Tum Hi Ho",
++          artistName: "Mithoon",
++          duration: 262,
++          instrumental: true,
++        });
++      return new Response("", { status: 404 });
++    }
++    if (u.includes("/api/search"))
++      return Response.json([
++        {
++          trackName: "Tum Hi Ho",
++          artistName: "Arijit Singh",
++          duration: 261,
++          syncedLyrics: "[00:10.00]Hum tere bin\n[00:14.00]Ab reh nahi sakte",
++        },
++      ]);
++    throw Error("unexpected " + u);
++  };
++  try {
++    const r = await findLyrics(tumHiHo, [
++      "local",
++      "lrclib-exact",
++      "lrclib-search",
++    ]);
++    assert.equal(r.type, "synced");
++    assert.equal(r.provider, "lrclib-search");
++    assert.equal(r.lines.length, 2);
++  } finally {
++    global.fetch = realFetch;
++  }
++});
++
++test("search hits are accepted when tagged with any credited artist", async () => {
++  const realFetch = global.fetch;
++  global.fetch = async (url) => {
++    const u = String(url);
++    if (u.includes("/api/get")) return new Response("", { status: 404 });
++    if (u.includes("/api/search")) {
++      assert.ok(!u.includes("artist_name"), "search should recall by title");
++      return Response.json([
++        {
++          trackName: "Tum Hi Ho",
++          artistName: "Somebody Else",
++          duration: 180,
++          syncedLyrics: "[00:01.00]Wrong recording",
++        },
++        {
++          trackName: "Tum Hi Ho",
++          artistName: "Arijit Singh",
++          duration: 262,
++          plainLyrics: "Hum tere bin ab reh nahi sakte",
++        },
++      ]);
++    }
++    throw Error("unexpected " + u);
++  };
++  try {
++    const r = await findLyrics(tumHiHo, ["lrclib-exact", "lrclib-search"]);
++    assert.equal(r.type, "plain");
++    assert.match(r.text, /reh nahi sakte/);
++  } finally {
++    global.fetch = realFetch;
++  }
++});
++
++test("instrumental is still honored when nothing better exists anywhere", async () => {
++  const realFetch = global.fetch;
++  global.fetch = async (url) => {
++    const u = String(url);
++    if (u.includes("/api/get"))
++      return u.includes("Arijit")
++        ? Response.json({
++            trackName: "Tum Hi Ho",
++            artistName: "Arijit Singh",
++            duration: 262,
++            instrumental: true,
++          })
++        : new Response("", { status: 404 });
++    if (u.includes("/api/search")) return Response.json([]);
++    throw Error("unexpected " + u);
++  };
++  try {
++    const r = await findLyrics(tumHiHo, ["lrclib-exact", "lrclib-search"]);
++    assert.equal(r.type, "instrumental");
++    assert.equal(r.provider, "lrclib-exact");
++  } finally {
++    global.fetch = realFetch;
++  }
++});
+diff --git a/music-app/tests/test7.test.mjs b/music-app/tests/test7.test.mjs
+new file mode 100644
+index 0000000..7e7474d
+--- /dev/null
++++ b/music-app/tests/test7.test.mjs
+@@ -0,0 +1,28 @@
++// test7: audio-source setting (auto / saavn / youtube).
++import test from "node:test";
++import assert from "node:assert/strict";
++import { cleanSettings, defaults } from "../src/v2/core.js";
++
++test("default audio source is auto (JioSaavn first, YouTube rescue)", () => {
++  assert.equal(defaults.audioSource, "auto");
++});
++
++test("cleanSettings keeps every valid audio source", () => {
++  for (const mode of ["auto", "saavn", "youtube"])
++    assert.equal(
++      cleanSettings({ ...defaults, audioSource: mode }).audioSource,
++      mode,
++    );
++});
++
++test("cleanSettings rejects unknown audio sources", () => {
++  assert.equal(
++    cleanSettings({ ...defaults, audioSource: "spotify" }).audioSource,
++    "auto",
++  );
++});
++
++test("legacy settings without audioSource get the auto default", () => {
++  const s = cleanSettings({ ...defaults, audioSource: undefined });
++  assert.equal(s.audioSource, "auto");
++});
