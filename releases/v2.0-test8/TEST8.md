@@ -32,11 +32,11 @@ Behavior notes:
 
 ## Testing
 
-- 63 JS unit tests (`node --test tests/*.test.mjs`), including the 4 new test8 cases — **63/63 pass** (run on the reconstructed test7 tree + test8 patch)
-- Changed JSX (`Player.jsx`, `SettingsView.jsx`) compiles cleanly via esbuild
-- Playwright e2e and JVM YtMatcher tests unchanged from test7 (all passing on record there)
-- **APK binary not built in this environment** (needs JDK 21 + Android SDK 35) — build with the recipe in RELEASE-NOTES.md; it is auto-signed with the committed `vibex-testing.keystore`
-- On-device check once built: play a song → open full player → Settings → Look & feel → Player style → Ember; the player page should show the warm artwork wash
+- 63 JS unit tests (`node --test tests/*.test.mjs`), including the 4 new test8 cases — **63/63 pass** (reconstructed test7 tree + test8 patch)
+- Changed JSX compiles cleanly (esbuild); full `vite build` succeeds; Ember style present in bundled assets
+- **APK built and verified**: `dev.viswesh.vibex.testing`, versionCode 10, `2.0-test8`, signed with the permanent testing cert `e626ed74…be94ee13`, SHA-256 `d8822bf4…047903`, 7,957,440 bytes; Ember CSS/JS confirmed inside the APK
+- Playwright e2e and JVM YtMatcher tests unchanged from test7 (passing on record there)
+- On-device check: play a song → full player → Settings → Look & feel → Player style → Ember; the player page should show the warm artwork wash
 
 ## Signing
 

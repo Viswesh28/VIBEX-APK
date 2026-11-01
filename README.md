@@ -4,7 +4,13 @@ Search and play music, manage a library and playlists, use lyrics and local audi
 
 ## Recommended download
 
-### [Download Vibex 2.0-test7](https://github.com/Viswesh28/VIBEX-APK/raw/main/releases/v2.0-test7/Vibex-2.0-test7.apk)
+### [Download Vibex 2.0-test8](https://github.com/Viswesh28/VIBEX-APK/raw/main/releases/v2.0-test8/Vibex-2.0-test8.apk) — new "Ember" player style
+
+**[Full test8 release notes](releases/v2.0-test8/RELEASE-NOTES.md)** · [Checksums](releases/v2.0-test8/SHA256SUMS) · [TEST8 details](releases/v2.0-test8/TEST8.md) · [Source patch](releases/v2.0-test8/Vibex-test8-changes.patch)
+
+Test8 adds a third player style, **Ember**: a warm, artwork-tinted player theme (Settings → Look & feel → Player style) next to Classic and Aurora glass — no heavy blur, so it stays smooth on budget devices. Version code **10**, same permanent testing signature as test7, so this APK installs **straight over test7** — no uninstall.
+
+### Previous: [Download Vibex 2.0-test7](https://github.com/Viswesh28/VIBEX-APK/raw/main/releases/v2.0-test7/Vibex-2.0-test7.apk)
 
 **[Full test7 release notes](releases/v2.0-test7/RELEASE-NOTES.md)** · [Checksums](releases/v2.0-test7/SHA256SUMS) · [TEST7 details](releases/v2.0-test7/TEST7.md) · [TEST6 details](releases/v2.0-test7/TEST6.md)
 
@@ -12,8 +18,8 @@ Test7 is cumulative: JioSaavn→YouTube stream takeover, the lyrics fallback cha
 
 | Build | Purpose | APK |
 |---|---|---|
-| **test8 — latest source** | Ember player style (fresh UI theme), version code 10; patch + keystore published, APK pending build | [Patch](releases/v2.0-test8/Vibex-test8-changes.patch) |
-| test7 — last full APK, still recommended install | Audio source setting, lyrics fix, YouTube takeover, Aurora UI, permanent signing | [Download](https://github.com/Viswesh28/VIBEX-APK/raw/main/releases/v2.0-test7/Vibex-2.0-test7.apk) |
+| **test8 — recommended** | Ember player style (fresh UI theme), version code 10, permanent signing | [Download](https://github.com/Viswesh28/VIBEX-APK/raw/main/releases/v2.0-test8/Vibex-2.0-test8.apk) |
+| test7 — previous | Audio source setting, lyrics fix, YouTube takeover, Aurora UI, permanent signing | [Download](https://github.com/Viswesh28/VIBEX-APK/raw/main/releases/v2.0-test7/Vibex-2.0-test7.apk) |
 | test5 — historical | Notification-session registration fix and Android-framework regression tests | [Download](https://github.com/Viswesh28/VIBEX-APK/releases/download/v2.0-test5-bundle/Vibex-2.0-test5.apk) |
 | test4 — historical | Fixed header/current-song return; known missing-notification defect | [Download](https://github.com/Viswesh28/VIBEX-APK/releases/download/v2.0-test5-bundle/Vibex-2.0-test4.apk) |
 | test3 — historical | Battery Saver, Home cache, playlist pins/sort, lyric offsets, optional autoplay | [Download](https://github.com/Viswesh28/VIBEX-APK/releases/download/v2.0-test5-bundle/Vibex-2.0-test3.apk) |
@@ -28,6 +34,12 @@ Test7 is cumulative: JioSaavn→YouTube stream takeover, the lyrics fallback cha
 - The original v1.0 app uses the separate package `dev.viswesh.vibex`. It is not automatically replaced and its private data does not automatically migrate into the test app.
 - Only install if you trust the source. Review Android security warnings; do not blindly bypass them or disable device protection. A checksum checks file integrity, not app safety.
 
+Test8 SHA-256:
+
+```text
+d8822bf42939868cc2cb3860f427bcdb0f5f0e6df546466af12c928f4c047903
+```
+
 Test7 SHA-256:
 
 ```text
@@ -38,9 +50,9 @@ Play a song, press Home, and expand the notification shade to check the music ca
 
 ## Source and verification
 
-Test7's recorded checks: **59 JavaScript + 27 browser + JVM YtMatcher tests**, all passing at build time; the lyrics fix was verified live against LRCLIB/KuGou with real JioSaavn metadata. Test5's earlier checks (44 JS + 26 browser + 32 JVM, incl. Robolectric notification simulations) remain on record. Existing dependency/security review remains open; earlier audits reported a `node-forge` advisory. No phone battery-life percentage or production-readiness claim is made.
+Test8's recorded checks: **63 JavaScript unit tests** passing on the reconstructed test7 tree + test8 patch (4 new for the Ember style), `vite build` clean, APK built and verified (`dev.viswesh.vibex.testing`, versionCode 10, `2.0-test8`, permanent testing cert `e626ed74…be94ee13`). Test7's recorded checks: **59 JavaScript + 27 browser + JVM YtMatcher tests**, all passing at build time; the lyrics fix was verified live against LRCLIB/KuGou with real JioSaavn metadata. Test5's earlier checks (44 JS + 26 browser + 32 JVM, incl. Robolectric notification simulations) remain on record. Existing dependency/security review remains open; earlier audits reported a `node-forge` advisory. No phone battery-life percentage or production-readiness claim is made.
 
-Source project: [Viswesh28/VIBEX](https://github.com/Viswesh28/VIBEX). This is the **distribution repository**. Test7's cumulative source patch (binary-aware, includes the testing keystore) ships in [releases/v2.0-test7](releases/v2.0-test7/); older patches are attached to the [test5 bundle release](https://github.com/Viswesh28/VIBEX-APK/releases/tag/v2.0-test5-bundle). See each bundle's release notes for the patch map and build caveats.
+Source project: [Viswesh28/VIBEX](https://github.com/Viswesh28/VIBEX). This is the **distribution repository**. Test8's source patch and APK ship in [releases/v2.0-test8](releases/v2.0-test8). Test7's cumulative source patch (binary-aware, includes the testing keystore) ships in [releases/v2.0-test7](releases/v2.0-test7/); older patches are attached to the [test5 bundle release](https://github.com/Viswesh28/VIBEX-APK/releases/tag/v2.0-test5-bundle). See each bundle's release notes for the patch map and build caveats.
 
 **Made with ❤️ by VISWESHSARAVAN**
 

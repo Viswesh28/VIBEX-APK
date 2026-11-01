@@ -1,6 +1,6 @@
 # Vibex 2.0-test8
 
-**Testing prerelease · 1 November 2026 · supersedes test7 as the latest source state.**
+**Testing prerelease · 1 November 2026 · supersedes test7.**
 
 One change over test7, cumulative: a new **Ember player style** (Settings → Look & feel → Player style), a fresh UI theme on the v2 player — warm artwork-tinted wash without heavy blur, warm cards, glowing artwork rim. Classic and Aurora glass unchanged, default stays Classic. Version code **10**, package `dev.viswesh.vibex.testing`. Still **login-free** — no account, no API keys, anywhere.
 
@@ -8,9 +8,9 @@ One change over test7, cumulative: a new **Ember player style** (Settings → Lo
 
 | File | Purpose |
 |---|---|
+| [Vibex-2.0-test8.apk](Vibex-2.0-test8.apk) | The app — 7,957,440 bytes, signed with the permanent testing key |
 | [Vibex-test8-changes.patch](Vibex-test8-changes.patch) | Source patch vs the test7 baseline (6 files, +97/−3) |
 | [vibex-testing.keystore](vibex-testing.keystore) | Permanent testing keystore (unchanged from test7; alias/password `vibex-testing`) |
-| Vibex-2.0-test8.apk | **Pending build** — not produced in the authoring environment (needs JDK 21 + Android SDK 35); see build recipe below |
 
 ## What's new since test7
 
@@ -23,9 +23,9 @@ Everything from test1–test7 carries over (audio source setting, YouTube takeov
 ## Checksums
 
 ```text
+d8822bf42939868cc2cb3860f427bcdb0f5f0e6df546466af12c928f4c047903  Vibex-2.0-test8.apk
 988277a6566367d6b7a2a17c7fe6d4e26df8044952a3c444ea04f8ddeed284d0  Vibex-test8-changes.patch
 cce87ff574be57fff6d72db70a521e491907d14511e6014cce162b64e100281f  vibex-testing.keystore
-# Vibex-2.0-test8.apk  -> added here once the APK is built (sha256 appended)
 ```
 
 ## Building the APK from source
