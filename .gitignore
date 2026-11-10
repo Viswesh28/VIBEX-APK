@@ -1,0 +1,8 @@
+# Android rewrite: generated output and local/private signing material
+.gradle/
+**/build/
+local.properties
+android-rewrite/signing.properties
+android-rewrite/**/*.jks
+android-rewrite/**/*.keystore
+!releases/**/vibex-testing.keystore
