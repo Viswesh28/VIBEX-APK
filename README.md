@@ -2,6 +2,10 @@
 
 Search and play music, manage a library and playlists, use lyrics and local audio, and keep playback in a native Android service.
 
+## Rewrite in development
+
+A native Android rewrite for the core player plus optional lossless streaming is available as **uncompiled source only** in [`android-rewrite/`](android-rewrite/README.md). It has not been built, run, or cleared by Play Protect and is not a replacement APK. See the [static security review](android-rewrite/SECURITY-REVIEW.md) for limitations and release blockers. The test7 download below is unchanged.
+
 ## Recommended download
 
 ### [Download Vibex 2.0-test7](https://github.com/Viswesh28/VIBEX-APK/raw/main/releases/v2.0-test7/Vibex-2.0-test7.apk)
